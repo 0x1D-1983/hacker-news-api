@@ -21,6 +21,8 @@ GET /api/stories/best?n=2
 
 ## Running
 
+### .NET
+
 Requirements: the [.NET 10 SDK](https://dotnet.microsoft.com/download).
 
 ```bash
@@ -29,6 +31,8 @@ curl "http://localhost:5097/api/stories/best?n=10"
 ```
 
 To try the endpoint interactively, open the Scalar UI at <http://localhost:5097/scalar/v1#tag/stories/GET/api/stories/best> and use its "Test Request" button.
+
+### Docker
 
 With Docker (the container listens on port 8080):
 
