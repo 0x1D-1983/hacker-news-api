@@ -1,3 +1,4 @@
+using HackerNews.Api.Controllers;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -6,7 +7,6 @@ namespace HackerNews.Api.Telemetry;
 
 public static class TelemetryExtensions
 {
-    private const string HealthPath = "/health";
     private const string RateLimitingMeter = "Microsoft.AspNetCore.RateLimiting";
 
     public static IServiceCollection AddHackerNewsTelemetry(
@@ -38,7 +38,7 @@ public static class TelemetryExtensions
                 .AddAspNetCoreInstrumentation(asp =>
                 {
                     asp.RecordException = true;
-                    asp.Filter = context => !context.Request.Path.StartsWithSegments(HealthPath);
+                    asp.Filter = context => !context.Request.Path.StartsWithSegments(HealthController.BasePath);
                 })
                 .AddHttpClientInstrumentation(http => http.RecordException = true)
                 .AddOtlpExporter(otlp => otlp.Endpoint = otlpEndpoint))

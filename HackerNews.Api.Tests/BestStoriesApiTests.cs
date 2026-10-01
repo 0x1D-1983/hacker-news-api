@@ -7,12 +7,16 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Time.Testing;
 
 namespace HackerNews.Api.Tests;
 
 public sealed class BestStoriesApiTests
 {
     private const string BestStoriesPath = "/v0/beststories.json";
+    private const string ReadinessPath = "/health/ready";
+    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ReadyPollInterval = TimeSpan.FromMilliseconds(20);
 
     [Fact]
     public async Task Returns_requested_number_of_stories_in_descending_score_order()
@@ -23,8 +27,9 @@ public sealed class BestStoriesApiTests
             .WithItem(2, Item(2, score: 300))
             .WithItem(3, Item(3, score: 120));
         await using var factory = CreateFactory(handler);
+        var client = await CreateReadyClientAsync(factory);
 
-        var stories = await factory.CreateClient().GetFromJsonAsync<Story[]>("/api/stories/best?n=2");
+        var stories = await client.GetFromJsonAsync<Story[]>("/api/stories/best?n=2");
 
         Assert.NotNull(stories);
         Assert.Equal([300, 120], stories.Select(story => story.Score));
@@ -41,8 +46,9 @@ public sealed class BestStoriesApiTests
                  "url":"https://github.com/uBlockOrigin/uBlock-issues/issues/745"}
                 """);
         await using var factory = CreateFactory(handler);
+        var client = await CreateReadyClientAsync(factory);
 
-        var json = await factory.CreateClient().GetStringAsync("/api/stories/best?n=1");
+        var json = await client.GetStringAsync("/api/stories/best?n=1");
 
         var story = JsonDocument.Parse(json).RootElement[0];
         Assert.Equal("A uBlock Origin update was rejected from the Chrome Web Store", story.GetProperty("title").GetString());
@@ -62,27 +68,109 @@ public sealed class BestStoriesApiTests
             .WithItem(2, """{"id":2,"deleted":true}""")
             .WithItem(3, """{"id":3,"dead":true,"score":99}""");
         await using var factory = CreateFactory(handler);
+        var client = await CreateReadyClientAsync(factory);
 
-        var stories = await factory.CreateClient().GetFromJsonAsync<Story[]>("/api/stories/best?n=10");
+        var stories = await client.GetFromJsonAsync<Story[]>("/api/stories/best?n=10");
 
         Assert.NotNull(stories);
         Assert.Equal([10], stories.Select(story => story.Score));
     }
 
     [Fact]
-    public async Task Serves_repeat_requests_from_cache_without_calling_hacker_news_again()
+    public async Task Serves_requests_from_the_hot_cache_without_calling_hacker_news()
     {
         var handler = new FakeHackerNewsHandler()
             .WithBestStories(1, 2)
             .WithItem(1, Item(1, score: 1))
             .WithItem(2, Item(2, score: 2));
         await using var factory = CreateFactory(handler);
-        var client = factory.CreateClient();
+        var client = await CreateReadyClientAsync(factory);
 
         await Task.WhenAll(Enumerable.Range(1, 20).Select(n => client.GetAsync($"/api/stories/best?n={n % 2 + 1}")));
 
         Assert.Equal(1, handler.Hits(BestStoriesPath));
         Assert.Equal(1, handler.Hits("/v0/item/1.json"));
+    }
+
+    [Fact]
+    public async Task Successful_refresh_replaces_the_served_stories()
+    {
+        var handler = new FakeHackerNewsHandler()
+            .WithBestStories(1)
+            .WithItem(1, Item(1, score: 10));
+        await using var factory = CreateFactory(handler);
+        var client = await CreateReadyClientAsync(factory);
+
+        handler.WithItem(1, Item(1, score: 99));
+        Assert.True(await factory.Services.GetRequiredService<BestStoriesRefreshWorker>().RefreshAsync(CancellationToken.None));
+
+        var stories = await client.GetFromJsonAsync<Story[]>("/api/stories/best?n=1");
+        Assert.Equal([99], stories!.Select(story => story.Score));
+    }
+
+    [Fact]
+    public async Task Failed_refresh_keeps_serving_the_last_good_stories()
+    {
+        var handler = new FakeHackerNewsHandler()
+            .WithBestStories(1)
+            .WithItem(1, Item(1, score: 10));
+        await using var factory = CreateFactory(handler);
+        var client = await CreateReadyClientAsync(factory);
+
+        handler.With(BestStoriesPath, "not json");
+        Assert.False(await factory.Services.GetRequiredService<BestStoriesRefreshWorker>().RefreshAsync(CancellationToken.None));
+
+        var stories = await client.GetFromJsonAsync<Story[]>("/api/stories/best?n=1");
+        Assert.Equal([10], stories!.Select(story => story.Score));
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync(ReadinessPath)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Readiness_fails_once_the_snapshot_is_older_than_the_ttl_but_stories_are_still_served()
+    {
+        var time = new FakeTimeProvider();
+        var handler = new FakeHackerNewsHandler()
+            .WithBestStories(1)
+            .WithItem(1, Item(1, score: 10));
+        await using var factory = CreateFactory(handler, time, ("HackerNews:CacheDuration", "01:00:00"));
+        var client = await CreateReadyClientAsync(factory);
+
+        handler.With(BestStoriesPath, "not json");
+        time.Advance(TimeSpan.FromHours(1) + TimeSpan.FromSeconds(1));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync(ReadinessPath)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/stories/best?n=1")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Is_not_ready_and_returns_503_until_the_first_load_succeeds()
+    {
+        var handler = new FakeHackerNewsHandler().With(BestStoriesPath, "not json");
+        await using var factory = CreateFactory(handler);
+        var client = factory.CreateClient();
+
+        var ready = await client.GetAsync(ReadinessPath);
+        var response = await client.GetAsync("/api/stories/best?n=1");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+        var readiness = JsonDocument.Parse(await ready.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("Unhealthy", readiness.GetProperty("status").GetString());
+        Assert.Equal("best-stories", readiness.GetProperty("checks")[0].GetProperty("name").GetString());
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.True(response.Headers.Contains("Retry-After"));
+        Assert.True(response.Headers.CacheControl?.NoStore);
+    }
+
+    [Fact]
+    public async Task Liveness_does_not_depend_on_the_cache()
+    {
+        var handler = new FakeHackerNewsHandler().With(BestStoriesPath, "not json");
+        await using var factory = CreateFactory(handler);
+
+        var response = await factory.CreateClient().GetAsync("/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     [Theory]
@@ -100,22 +188,11 @@ public sealed class BestStoriesApiTests
     }
 
     [Fact]
-    public async Task Returns_503_when_hacker_news_returns_an_unreadable_response()
-    {
-        var handler = new FakeHackerNewsHandler().With(BestStoriesPath, "not json");
-        await using var factory = CreateFactory(handler);
-
-        var response = await factory.CreateClient().GetAsync("/api/stories/best?n=1");
-
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-    }
-
-    [Fact]
     public async Task Throttles_clients_that_exceed_the_rate_limit()
     {
         await using var factory = CreateFactory(
             new FakeHackerNewsHandler().WithBestStories(),
-            ("RateLimiting:TokenLimit", "2"));
+            settings: ("RateLimiting:TokenLimit", "2"));
         var client = factory.CreateClient();
 
         await client.GetAsync("/api/stories/best?n=1");
@@ -126,8 +203,13 @@ public sealed class BestStoriesApiTests
         Assert.True(throttled.Headers.Contains("Retry-After"));
     }
 
+    /// <summary>
+    /// Uses a frozen <see cref="FakeTimeProvider"/> by default so the worker's timer never fires on its own;
+    /// tests trigger rebuilds explicitly through <see cref="BestStoriesRefreshWorker.RefreshAsync"/>.
+    /// </summary>
     private static WebApplicationFactory<Program> CreateFactory(
         FakeHackerNewsHandler handler,
+        FakeTimeProvider? time = null,
         params (string Key, string Value)[] settings)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -135,10 +217,23 @@ public sealed class BestStoriesApiTests
             foreach (var (key, value) in settings)
                 builder.UseSetting(key, value);
 
-            builder.ConfigureTestServices(services => services
-                .AddHttpClient<HackerNewsClient>()
-                .ConfigurePrimaryHttpMessageHandler(() => handler));
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddSingleton<TimeProvider>(time ?? new FakeTimeProvider());
+                services.AddHttpClient<HackerNewsClient>().ConfigurePrimaryHttpMessageHandler(() => handler);
+            });
         });
+
+    private static async Task<HttpClient> CreateReadyClientAsync(WebApplicationFactory<Program> factory)
+    {
+        var client = factory.CreateClient();
+        using var timeout = new CancellationTokenSource(ReadyTimeout);
+
+        while ((await client.GetAsync(ReadinessPath, timeout.Token)).StatusCode != HttpStatusCode.OK)
+            await Task.Delay(ReadyPollInterval, timeout.Token);
+
+        return client;
+    }
 
     private static string Item(long id, int score)
         => $$"""{"id":{{id}},"type":"story","by":"user{{id}}","time":1570887781,"title":"Story {{id}}","url":"https://example.com/{{id}}","score":{{score}},"descendants":0}""";

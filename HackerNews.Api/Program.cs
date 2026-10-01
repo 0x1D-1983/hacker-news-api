@@ -1,12 +1,13 @@
 using HackerNews.Api;
+using HackerNews.Api.Controllers;
 using HackerNews.Api.RateLimiting;
 using HackerNews.Api.Stories;
 using HackerNews.Api.Telemetry;
 using Scalar.AspNetCore;
 using Serilog;
+using Serilog.Events;
 
 const string ServiceName = "HackerNews.Api";
-const string HealthPath = "/health";
 var requestTimeout = TimeSpan.FromSeconds(30);
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,7 +30,7 @@ builder.Services.AddBestStories(builder.Configuration);
 var app = builder.Build();
 
 app.UseExceptionHandler();
-app.UseSerilogRequestLogging();
+app.UseSerilogRequestLogging(options => options.GetLevel = GetRequestLogLevel);
 
 if (app.Environment.IsDevelopment())
 {
@@ -41,7 +42,6 @@ app.UseHttpsRedirection();
 app.UseRateLimiter();
 app.UseRequestTimeouts();
 
-app.MapHealthChecks(HealthPath);
 app.MapControllers();
 
 try
@@ -56,6 +56,17 @@ catch (Exception ex)
 finally
 {
     await Log.CloseAndFlushAsync();
+}
+
+// Health probes run every few seconds; logging them would drown out real traffic.
+static LogEventLevel GetRequestLogLevel(HttpContext context, double elapsedMs, Exception? exception)
+{
+    if (context.Request.Path.StartsWithSegments(HealthController.BasePath))
+        return LogEventLevel.Verbose;
+
+    return exception is not null || context.Response.StatusCode >= StatusCodes.Status500InternalServerError
+        ? LogEventLevel.Error
+        : LogEventLevel.Information;
 }
 
 public partial class Program { }

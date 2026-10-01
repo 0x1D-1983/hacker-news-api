@@ -1,4 +1,5 @@
 using HackerNews.Api.HackerNews;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace HackerNews.Api.Stories;
@@ -10,9 +11,13 @@ public static class StoriesServiceCollectionExtensions
         services.AddOptions<HackerNewsOptions>()
             .Bind(configuration.GetSection(HackerNewsOptions.SectionName))
             .ValidateDataAnnotations()
+            .Validate(
+                options => options.RefreshInterval < options.CacheDuration,
+                $"{HackerNewsOptions.SectionName}:{nameof(HackerNewsOptions.RefreshInterval)} must be shorter than " +
+                $"{HackerNewsOptions.SectionName}:{nameof(HackerNewsOptions.CacheDuration)}.")
             .ValidateOnStart();
 
-        services.AddHybridCache();
+        services.TryAddSingleton(TimeProvider.System);
 
         services.AddHttpClient<HackerNewsClient>((serviceProvider, httpClient) =>
             {
@@ -20,7 +25,13 @@ public static class StoriesServiceCollectionExtensions
             })
             .AddStandardResilienceHandler();
 
-        services.AddSingleton<BestStoriesService>();
+        services.AddSingleton<BestStoriesLoader>();
+        services.AddSingleton<BestStoriesCache>();
+        services.AddSingleton<BestStoriesRefreshWorker>();
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<BestStoriesRefreshWorker>());
+
+        services.AddHealthChecks()
+            .AddCheck<BestStoriesReadinessCheck>(BestStoriesReadinessCheck.Name, tags: [BestStoriesReadinessCheck.ReadyTag]);
 
         return services;
     }

@@ -8,3 +8,7 @@ Accept: application/json
 GET {{HackerNews.Api_HostAddress}}/health
 
 ###
+
+GET {{HackerNews.Api_HostAddress}}/health/ready
+
+###
