@@ -4,6 +4,7 @@ using System.Text.Json;
 using HackerNews.Api.HackerNews;
 using HackerNews.Api.Stories;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,6 +16,8 @@ public sealed class BestStoriesApiTests
 {
     private const string BestStoriesPath = "/v0/beststories.json";
     private const string ReadinessPath = "/health/ready";
+    private const string TrustedProxyNetwork = "10.244.0.0/16";
+    private const string TrustedProxy = "10.244.0.2";
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ReadyPollInterval = TimeSpan.FromMilliseconds(20);
 
@@ -198,6 +201,62 @@ public sealed class BestStoriesApiTests
         Assert.Equal(HttpStatusCode.TooManyRequests, throttled.StatusCode);
         Assert.True(throttled.Headers.Contains("Retry-After"));
     }
+
+    [Fact]
+    public async Task Rate_limits_by_forwarded_client_address_when_the_proxy_is_trusted()
+    {
+        await using var factory = CreateProxiedFactory();
+
+        var first = await SendFromAsync(factory, TrustedProxy, forwardedFor: "203.0.113.1");
+        var sameClient = await SendFromAsync(factory, TrustedProxy, forwardedFor: "203.0.113.1");
+        var otherClient = await SendFromAsync(factory, TrustedProxy, forwardedFor: "203.0.113.2");
+
+        Assert.NotEqual(StatusCodes.Status429TooManyRequests, first.Response.StatusCode);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, sameClient.Response.StatusCode);
+        Assert.NotEqual(StatusCodes.Status429TooManyRequests, otherClient.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Uses_only_the_address_appended_by_the_trusted_proxy()
+    {
+        await using var factory = CreateProxiedFactory();
+
+        await SendFromAsync(factory, TrustedProxy, forwardedFor: "198.51.100.1, 203.0.113.1");
+        var spoofed = await SendFromAsync(factory, TrustedProxy, forwardedFor: "198.51.100.2, 203.0.113.1");
+        var otherClient = await SendFromAsync(factory, TrustedProxy, forwardedFor: "198.51.100.1, 203.0.113.2");
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests, spoofed.Response.StatusCode);
+        Assert.NotEqual(StatusCodes.Status429TooManyRequests, otherClient.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Ignores_forwarded_headers_from_untrusted_senders()
+    {
+        await using var factory = CreateProxiedFactory();
+
+        await SendFromAsync(factory, "192.0.2.10", forwardedFor: "203.0.113.1");
+        var spoofed = await SendFromAsync(factory, "192.0.2.10", forwardedFor: "203.0.113.2");
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests, spoofed.Response.StatusCode);
+    }
+
+    private static WebApplicationFactory<Program> CreateProxiedFactory()
+        => CreateFactory(
+            new FakeHackerNewsHandler().WithBestStories(),
+            settings: [("TrustedProxies:Networks:0", TrustedProxyNetwork), ("RateLimiting:TokenLimit", "1")]);
+
+    private static Task<HttpContext> SendFromAsync(
+        WebApplicationFactory<Program> factory,
+        string remoteAddress,
+        string forwardedFor)
+        => factory.Server.SendAsync(context =>
+        {
+            context.Request.Method = HttpMethods.Get;
+            context.Request.Path = "/api/stories/best";
+            context.Request.QueryString = new QueryString("?n=1");
+            context.Connection.RemoteIpAddress = IPAddress.Parse(remoteAddress);
+            context.Request.Headers["X-Forwarded-For"] = forwardedFor;
+        });
 
     /// <summary>
     /// Uses a frozen <see cref="FakeTimeProvider"/> by default so the worker's timer never fires on its own;

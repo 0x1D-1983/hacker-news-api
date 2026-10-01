@@ -1,4 +1,5 @@
 using HackerNews.Api;
+using HackerNews.Api.Proxies;
 using HackerNews.Api.RateLimiting;
 using HackerNews.Api.Stories;
 using HackerNews.Api.Telemetry;
@@ -22,6 +23,7 @@ builder.Services.AddHackerNewsTelemetry(builder.Configuration, ServiceName);
 
 builder.Services.AddExceptionHandler<ApplicationExceptionHandler>();
 builder.Services.AddProblemDetails();
+builder.Services.AddTrustedProxies(builder.Configuration);
 builder.Services.AddClientRateLimiting(builder.Configuration);
 builder.Services.AddRequestTimeouts(timeouts => timeouts.DefaultPolicy = new() { Timeout = requestTimeout });
 builder.Services.AddHealthChecks();
@@ -32,6 +34,7 @@ builder.Services.AddBestStories(builder.Configuration);
 
 var app = builder.Build();
 
+app.UseForwardedHeaders();
 app.UseExceptionHandler();
 app.UseSerilogRequestLogging(options => options.GetLevel = GetRequestLogLevel);
 

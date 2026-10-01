@@ -6,6 +6,8 @@ metadata:
   name: edge
 spec:
   type: NodePort
+  # Keep the client's source IP (no SNAT to the node), so Envoy forwards the real address.
+  externalTrafficPolicy: Local
   selector:
     app: edge-envoy
   ports:

@@ -70,7 +70,9 @@ curl -i localhost:8080/health                  # 404 from Envoy: not routed
 
 **Only `/api/*` is exposed publicly.** The health endpoints aren't meant to be public, so they're protected at the network layer rather than in the app. Envoy routes `/api` and `/api/*` to the API Service and answers everything else itself with `404`, including `/health*`, `/openapi` and `/scalar`. It normalises paths before routing, so `/api/../health` and `/api/%2e%2e/health` also get `404`. Encoded slashes (`%2F`) are rejected with `400`. The kubelet's startup, readiness and liveness probes call the API pod IP directly, so they bypass the edge and keep working. Readiness gates traffic until the first Hacker News load finishes.
 
-Envoy also sets request-header and idle timeouts, rejects headers with underscores, and keeps its admin interface on localhost inside the pod. Its config lives in `k8s/edge/envoy.yaml`. Kustomize adds a content hash to the ConfigMap name, so editing the config restarts Envoy on the next deploy.
+Envoy also sets request-header and idle timeouts, rejects headers with underscores, and retries connection failures and resets. Retrying is safe because the API is read-only, and it keeps API rollouts free of errors. Its admin interface stays on localhost inside the pod.
+
+**Per-client rate limiting works through the edge.** Envoy appends the caller's address to `X-Forwarded-For`, and the edge Service uses `externalTrafficPolicy: Local` so that address isn't replaced by the node's. The API trusts the header only from `TrustedProxies:Networks`, set to kind's pod network (`10.244.0.0/16`). A NetworkPolicy allows only the Envoy pods to connect to the API, so in practice only Envoy is trusted. The app reads just the right-most entry, the one Envoy appended, so a client can't choose its rate-limit bucket by sending its own `X-Forwarded-For`. Kubelet probes and `kubectl port-forward` come from the node rather than a pod, so the policy doesn't affect them. Its config lives in `k8s/edge/envoy.yaml`. Kustomize adds a content hash to the ConfigMap name, so editing the config restarts Envoy on the next deploy.
 
 For developer access to everything, including `/health` and the Scalar UI, go to the API Service directly:
 
@@ -136,6 +138,7 @@ All settings live in `HackerNews.Api/appsettings.json` and can be overridden wit
 | `HackerNews:RefreshInterval` | `00:55:00` | Time between successful rebuilds; must be shorter than `CacheDuration` (checked at startup) |
 | `HackerNews:RetryInterval` | `00:01:00` | Time before retrying after a failed rebuild |
 | `HackerNews:MaxConcurrentRequests` | `8` | Maximum parallel item requests to Hacker News during a refresh |
+| `TrustedProxies:Networks` | `[]` | CIDR ranges of reverse proxies whose `X-Forwarded-For` is trusted (loopback is always trusted) |
 | `RateLimiting:TokenLimit` | `30` | Burst size per client IP |
 | `RateLimiting:TokensPerPeriod` / `ReplenishmentPeriod` | `30` / `00:01:00` | Sustained rate per client IP (30 requests/minute) |
 | `Telemetry:Enabled` / `OtlpEndpoint` | `true` / `http://localhost:4317` | OpenTelemetry export |
@@ -188,14 +191,14 @@ Requests never call Hacker News. The worker owns all upstream traffic:
 - **A rebuild is all-or-nothing.** If any item request still fails after retries, the whole rebuild is discarded and the previous list stays in place. A partial ranking is never published.
 - **Serving stale data beats serving nothing.** During a long Hacker News outage the API keeps answering with the last good list, while readiness reports `503` once that list is older than `CacheDuration`. In Kubernetes, that would take every replica out of rotation at about the same time during a long outage. If you'd rather keep serving, set a larger `CacheDuration` or point the readiness probe at liveness after the first load.
 - **Single instance.** Each instance keeps its own in-memory list and polls Hacker News on its own schedule.
-- **Rate limiting uses the TCP remote address.** Forwarded headers are not trusted by default. Behind the edge Envoy in Kubernetes, every client therefore arrives from the Envoy pod's address and shares a single rate-limit bucket; see the enhancements below.
+- **Rate limiting keys on the client IP.** That is the TCP remote address, unless the request comes from a trusted proxy network (`TrustedProxies:Networks`), in which case it's the right-most `X-Forwarded-For` entry. Clients behind a shared NAT share a bucket.
 
 ## Enhancements given more time
 
 - **Separate Worker service with a shared cache.** Move `BestStoriesRefreshWorker` into its own .NET Worker Service that writes the ranked list to Redis, with the API instances only reading it. Hacker News load would then stay at one poller no matter how many API replicas run, and replicas would start ready immediately. A distributed lock or leader election would keep a single poller active. A distributed rate limiter (for example Redis-backed) would belong here too.
 - **Snapshot age metric.** Export the list's age as an observable gauge, so alerts fire before readiness flips.
 - **Incremental updates.** Use Firebase change notifications or `/v0/updates` to refetch only changed items instead of all 200.
-- **Reverse-proxy awareness.** The edge Envoy already appends the client address to `X-Forwarded-For` (`use_remote_address: true`). Enable `ForwardedHeaders` in the app and trust only the Envoy pods' network (`KnownNetworks`), so rate limiting keys on the real client IP. Alternatively, rate-limit at the edge with Envoy's `local_ratelimit` filter. Optionally add API keys with per-key quotas.
+- **Rate limiting at the edge and per API key.** Add Envoy's `local_ratelimit` (or a global rate-limit service) to reject abusive clients before they reach the API, and optionally API keys with per-key quotas. In production, narrow `TrustedProxies:Networks` to a dedicated proxy subnet or node pool if the CNI allows it.
 - **Output caching** (`AddOutputCache`, varied by `n`) to skip serialization for hot responses, plus `ETag`/`304` support.
-- **Hardening:** TLS termination at the edge Envoy plus HSTS, Kestrel connection limits, a CORS policy if browsers call the API, a NetworkPolicy so only the edge Envoy can reach the API pods, a LoadBalancer Service and 2+ Envoy replicas instead of the kind NodePort, and a CI pipeline that builds and pushes the image.
+- **Hardening:** TLS termination at the edge Envoy plus HSTS, Kestrel connection limits, a CORS policy if browsers call the API, a LoadBalancer Service and 2+ Envoy replicas instead of the kind NodePort, and a CI pipeline that builds and pushes the image.
 - **More tests:** load tests (k6 / NBomber) to confirm throughput and that upstream calls stay flat under load, plus resilience tests with simulated upstream faults.

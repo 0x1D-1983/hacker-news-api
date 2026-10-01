@@ -32,7 +32,14 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { path_separated_prefix: /api }
-                          route: { cluster: hackernews_api, timeout: 15s }
+                          route:
+                            cluster: hackernews_api
+                            timeout: 15s
+                            # The API is read-only, so retrying is safe; covers pooled connections
+                            # to a pod that is shutting down during a rollout.
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,reset
+                              num_retries: 2
                         - match: { prefix: / }
                           direct_response: { status: 404 }
                 http_filters:

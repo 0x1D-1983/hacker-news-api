@@ -37,6 +37,10 @@ spec:
             # No OTLP collector runs in this cluster; point this at one to export traces and metrics.
             - name: Telemetry__Enabled
               value: "false"
+            # kind's pod network. Trust X-Forwarded-For from it; the NetworkPolicy below makes sure
+            # only the edge Envoy pods can actually connect.
+            - name: TrustedProxies__Networks__0
+              value: 10.244.0.0/16
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -65,3 +69,22 @@ spec:
               path: /health
               port: http
             periodSeconds: 10
+---
+# Only the edge Envoy may connect to the API, so trusting X-Forwarded-For from the pod network
+# means trusting Envoy alone. Kubelet probes and kubectl port-forward come from the node, not a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hackernews-api
+spec:
+  podSelector:
+    matchLabels:
+      app: hackernews-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: edge-envoy
+      ports:
+        - port: http
