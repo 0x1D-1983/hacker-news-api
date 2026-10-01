@@ -34,7 +34,7 @@ Other endpoints:
 |---|---|
 | `GET /api/stories/best?n={1..200}` | Best `n` stories, ordered by descending score |
 | `GET /health` | Liveness: `200` whenever the process is up |
-| `GET /health/ready` | Readiness: `200` only when the best stories are loaded and younger than `CacheDuration`, otherwise `503`. The JSON body shows each check's status, description, last refresh time, age, and story count |
+| `GET /health/ready` | Readiness: `200` only when the best stories are loaded and younger than `CacheDuration`, otherwise `503` |
 | `GET /openapi/v1.json` | OpenAPI document (Development only) |
 | `GET /scalar` | [Scalar](https://scalar.com) interactive API reference (Development only) |
 

@@ -153,10 +153,6 @@ public sealed class BestStoriesApiTests
         var response = await client.GetAsync("/api/stories/best?n=1");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
-        var readiness = JsonDocument.Parse(await ready.Content.ReadAsStringAsync()).RootElement;
-        Assert.Equal("Unhealthy", readiness.GetProperty("status").GetString());
-        Assert.Equal("best-stories", readiness.GetProperty("checks")[0].GetProperty("name").GetString());
-
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.True(response.Headers.Contains("Retry-After"));
         Assert.True(response.Headers.CacheControl?.NoStore);
