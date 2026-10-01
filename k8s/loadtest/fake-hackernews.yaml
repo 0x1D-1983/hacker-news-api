@@ -1,0 +1,67 @@
+# Fake Hacker News (WireMock) for load and resilience tests, so they never hit the real API.
+# It also gives k6 two things through its admin API (/__admin): a count of the upstream calls
+# the API made, and runtime fault injection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-hackernews
+spec:
+  selector:
+    app: fake-hackernews
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-hackernews
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-hackernews
+  template:
+    metadata:
+      labels:
+        app: fake-hackernews
+    spec:
+      nodeSelector:
+        hackernews.io/pool: loadtest
+      tolerations:
+        - key: hackernews.io/pool
+          operator: Equal
+          value: loadtest
+          effect: NoSchedule
+      containers:
+        - name: wiremock
+          image: wiremock/wiremock:3.13.2
+          args:
+            - --port=8080
+            - --disable-banner
+            # The journal backs the upstream request count; cap it so a regression can't exhaust memory.
+            - --max-request-journal-entries=100000
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: mappings
+              mountPath: /home/wiremock/mappings
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          readinessProbe:
+            httpGet:
+              path: /__admin/health
+              port: http
+            periodSeconds: 5
+      volumes:
+        - name: mappings
+          configMap:
+            name: fake-hackernews-mappings

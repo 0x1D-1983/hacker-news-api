@@ -8,10 +8,10 @@ public sealed class ClientRateLimitOptions
     public const string SectionName = "RateLimiting";
 
     /// <summary>Burst size: requests a client can make back to back.</summary>
-    [Range(1, 10_000)]
+    [Range(1, 1_000_000)]
     public int TokenLimit { get; set; } = 30;
 
-    [Range(1, 10_000)]
+    [Range(1, 1_000_000)]
     public int TokensPerPeriod { get; set; } = 30;
 
     [Range(typeof(TimeSpan), "00:00:01", "01:00:00")]

@@ -1,0 +1,42 @@
+# The app (API + edge) wired to the fake Hacker News, with timings shortened so a few-minute
+# test sees many refresh cycles. Used by the Skaffold `loadtest` profile.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../api
+  - ../edge
+  - fake-hackernews.yaml
+configMapGenerator:
+  - name: fake-hackernews-mappings
+    files:
+      - mappings/beststories.json
+      - mappings/item.json
+patches:
+  - target:
+      kind: Deployment
+      name: hackernews-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: HackerNews__BaseAddress, value: "http://fake-hackernews:8080/v0/" }
+      # Refresh every 10 s (instead of 55 min) so tests observe many cycles; the 5 min TTL keeps
+      # the API ready through the resilience test's 2-minute simulated outage.
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: HackerNews__RefreshInterval, value: "00:00:10" }
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: HackerNews__RetryInterval, value: "00:00:05" }
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: HackerNews__CacheDuration, value: "00:05:00" }
+      # Every k6 VU shares the k6 pod's IP, so the per-client limit is lifted for load tests.
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: RateLimiting__TokenLimit, value: "1000000" }
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: RateLimiting__TokensPerPeriod, value: "1000000" }
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: RateLimiting__ReplenishmentPeriod, value: "00:00:01" }

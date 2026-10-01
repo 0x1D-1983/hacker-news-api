@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/v0/item/[0-9]+\\.json"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"id\":{{regexExtract request.path '[0-9]+(?=\\.json)'}},\"by\":\"user{{regexExtract request.path '[0-9]+(?=\\.json)'}}\",\"time\":{{now format='unix'}},\"title\":\"Story {{regexExtract request.path '[0-9]+(?=\\.json)'}}\",\"url\":\"https://example.com/{{regexExtract request.path '[0-9]+(?=\\.json)'}}\",\"score\":{{randomInt lower=1 upper=5000}},\"descendants\":{{randomInt lower=0 upper=1000}},\"type\":\"story\"}",
+    "transformers": [
+      "response-template"
+    ],
+    "delayDistribution": {
+      "type": "lognormal",
+      "median": 80,
+      "sigma": 0.4
+    }
+  }
+}

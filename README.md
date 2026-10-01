@@ -46,20 +46,25 @@ Requirements: Docker, [kind](https://kind.sigs.k8s.io/), kubectl and [Skaffold](
 
 ```
 k8s/
-  kind-cluster.yaml   single-node kind cluster
-  api.yaml            API Deployment (probes, resources, non-root) and ClusterIP Service
-  edge/               edge Envoy proxy (kustomize)
+  kind-cluster.yaml   kind cluster: control plane + "app" worker + tainted "loadtest" worker
+  api/api.yaml        API Deployment (probes, resources, non-root), ClusterIP Service, NetworkPolicy
+  edge/               edge Envoy proxy
     envoy.yaml        Envoy config: routes /api/* only
     edge.yaml         Envoy Deployment and NodePort Service
-    kustomization.yaml  turns envoy.yaml into a ConfigMap
+  loadtest/           overlay: api + edge wired to a fake Hacker News (WireMock), see Load tests
+  k6/                 k6 scripts (load, breakpoint, resilience), packaged as a ConfigMap
+  k6.yaml             one-off k6 Job (runs load.js)
+  k6-shell.yaml       long-lived k6 pod for running scripts by hand
 scripts/cluster-up.sh creates the cluster
-skaffold.yaml         build + deploy
+skaffold.yaml         build + deploy (profile "loadtest" for the load-test stack)
 ```
 
 ```bash
 ./scripts/cluster-up.sh   # creates the "hackernews" kind cluster and switches kubectl to kind-hackernews
 skaffold run              # one-off build and deploy (skaffold dev: rebuild on change and stream logs)
 ```
+
+The API and the edge are pinned to the `app` node. The `loadtest` node is tainted so only the load generator and the fake upstream run there, keeping them from competing with the system under test for CPU.
 
 The public entry point is an **edge Envoy proxy** on <http://localhost:8080>. kind publishes the edge NodePort (30080) on the host:
 
@@ -84,9 +89,68 @@ open http://localhost:8081/scalar/v1
 Cleanup:
 
 ```bash
-skaffold delete
+skaffold delete                  # add -p loadtest if that's what you deployed
+kubectl delete pod k6-shell --ignore-not-found
 kind delete cluster --name hackernews
 ```
+
+### Load and resilience tests (k6)
+
+The tests run inside the cluster against the edge (`http://edge`), so they exercise the same path as real clients: Envoy, then the API. The real Hacker News is replaced by **WireMock** (`k8s/loadtest/fake-hackernews.yaml`). It serves 200 story ids and templated items with random scores and realistic lognormal latency (median about 80 ms). Its admin API gives the tests two things: a count of the requests the API sent upstream, and faults injected at runtime.
+
+The `loadtest` overlay changes a few API settings so a short test sees many refresh cycles:
+
+| Setting | Load test | Default |
+|---|---|---|
+| `HackerNews:RefreshInterval` / `RetryInterval` | 10 s / 5 s | 55 min / 1 min |
+| `HackerNews:CacheDuration` | 5 min | 1 h |
+| `RateLimiting:TokenLimit` / `TokensPerPeriod` | 1,000,000 per second | 30 per minute |
+
+The rate limit is lifted because every k6 virtual user (VU) comes from one pod IP and would share a single bucket. `CacheDuration` stays longer than the 2-minute simulated outage, so readiness doesn't take the API out of rotation mid-test.
+
+Node budgets (kind doesn't enforce them; they're the container limits on each node):
+
+| Node | Workloads | CPU / memory limits |
+|---|---|---|
+| `app` | API (500m / 256Mi), edge Envoy (250m / 128Mi) | 0.75 vCPU / 384Mi |
+| `loadtest` | k6 (3 CPU / 6Gi), WireMock (1 CPU / 768Mi) | 4 vCPU / 6.75Gi |
+
+Deploy the stack and run `load.js` as a Job:
+
+```bash
+skaffold run -p loadtest
+kubectl logs -f job/k6
+```
+
+Run the other scripts from the k6 shell pod (`kubectl apply -k k8s/k6` first if you edited a script):
+
+```bash
+kubectl apply -f k8s/k6-shell.yaml
+kubectl exec -it k6-shell -- k6 run resilience.js
+kubectl exec -it k6-shell -- env STEP_VUS=100 MAX_VUS=600 HOLD_SECONDS=15 k6 run breakpoint.js
+```
+
+| Script | What it does | Passes when |
+|---|---|---|
+| `load.js` | Ramps to 50 VUs, holds for 2 minutes, random `n` per request | p95 < 500 ms, < 1% errors, ordering and length checks pass, upstream calls stay within the time-based budget |
+| `breakpoint.js` | Adds `STEP_VUS` every step up to `MAX_VUS`, aborting at the first step that misses the criteria | Reports the breaking point and the upstream calls for the run |
+| `resilience.js` | 20 VUs of steady traffic while a chaos VU applies four 30 s upstream faults in turn: `beststories` returns 503; item requests reset the connection; `beststories` hangs for 20 s; `beststories` returns malformed JSON | Zero client errors and p95 < 500 ms throughout. During each fault the same list keeps being served. Upstream calls during the outage stay within a retry budget. A fresh list appears after recovery |
+
+The upstream budget is `(ceil(seconds / RefreshInterval) + 2) × 201` calls: it depends only on the test's length, never on its traffic. Each script fails if the count from WireMock exceeds it.
+
+Measured on an Apple Silicon laptop (Docker Desktop):
+
+| Run | Client requests | Throughput | p95 | Errors | Hacker News calls |
+|---|---|---|---|---|---|
+| `load.js` (50 VUs, 3 min) | 437,361 | 2,429 req/s | 93 ms | 0 | 3,015 (budget 4,020): 15 refreshes × 201 |
+| `breakpoint.js` (100 → 600 VUs, 2 min) | 376,134 | 3,131 req/s | 302 ms (410 ms at 600 VUs) | 0 | 1,985 (budget 2,814) |
+| `resilience.js` (20 VUs, 3.7 min) | 510,952 | 2,271 req/s | 88 ms | 0 | 290 during the 2-minute outage (budget 20,904) |
+
+The number of upstream calls tracks elapsed time, not traffic: 437k client requests cost the same 201 calls per refresh as an idle API would. During the outage the API kept serving the last good list with no client-visible errors. It retried every 5 seconds, not once per request, and picked up a fresh list within one refresh after recovery.
+
+No step up to 600 VUs breached the criteria. Throughput levels off at about 3,100–3,300 req/s while latency grows, and **the bottleneck is the edge Envoy's 250m CPU limit, not the API**: Envoy was throttled in 86% of CFS periods, the API in about 1%. That throttling is also why p95 sits near 90 ms even at low load (CFS enforces limits in 100 ms periods). Serving a request from the hot cache costs the API very little; raise the Envoy limit or add replicas to go further.
+
+Faults are injected one after another. A rebuild that started under one fault may retry successfully once that fault is lifted, which is correct behaviour. So each phase waits 15 seconds (longer than the HTTP client's retries) before pinning the list it expects to stay unchanged.
 
 Other endpoints:
 
@@ -201,4 +265,4 @@ Requests never call Hacker News. The worker owns all upstream traffic:
 - **Rate limiting at the edge and per API key.** Add Envoy's `local_ratelimit` (or a global rate-limit service) to reject abusive clients before they reach the API, and optionally API keys with per-key quotas. In production, narrow `TrustedProxies:Networks` to a dedicated proxy subnet or node pool if the CNI allows it.
 - **Output caching** (`AddOutputCache`, varied by `n`) to skip serialization for hot responses, plus `ETag`/`304` support.
 - **Hardening:** TLS termination at the edge Envoy plus HSTS, Kestrel connection limits, a CORS policy if browsers call the API, a LoadBalancer Service and 2+ Envoy replicas instead of the kind NodePort, and a CI pipeline that builds and pushes the image.
-- **More tests:** load tests (k6 / NBomber) to confirm throughput and that upstream calls stay flat under load, plus resilience tests with simulated upstream faults.
+- **Edge sizing.** The load tests show Envoy's 250m CPU limit caps throughput at about 3,200 req/s. Give the edge more CPU (or replicas) before the API, and run the breakpoint test in CI against a fixed-size cluster to catch regressions.

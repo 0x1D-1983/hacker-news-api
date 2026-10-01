@@ -25,6 +25,8 @@ spec:
       labels:
         app: hackernews-api
     spec:
+      nodeSelector:
+        hackernews.io/pool: app
       securityContext:
         runAsNonRoot: true
       containers:

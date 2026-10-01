@@ -9,4 +9,4 @@ if ! kind get clusters | grep -qx hackernews; then
 fi
 
 kubectl config use-context kind-hackernews
-kubectl get nodes
+kubectl get nodes -L hackernews.io/pool

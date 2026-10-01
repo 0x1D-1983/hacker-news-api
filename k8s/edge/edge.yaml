@@ -31,6 +31,9 @@ spec:
       labels:
         app: edge-envoy
     spec:
+      # Same node as the kind port mapping; externalTrafficPolicy: Local only accepts traffic there.
+      nodeSelector:
+        hackernews.io/pool: app
       securityContext:
         runAsNonRoot: true
       containers:

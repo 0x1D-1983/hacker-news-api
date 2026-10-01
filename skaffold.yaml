@@ -13,10 +13,9 @@ build:
   local:
     push: false
 manifests:
-  rawYaml:
-    - k8s/api.yaml
   kustomize:
     paths:
+      - k8s/api
       - k8s/edge
 deploy:
   kubectl: {}
@@ -27,3 +26,16 @@ portForward:
     resourceName: hackernews-api
     port: 80
     localPort: 8081
+profiles:
+  # API wired to the fake Hacker News, the k6-script ConfigMap, and a one-off k6 Job running load.js.
+  - name: loadtest
+    patches:
+      - op: replace
+        path: /manifests/kustomize/paths
+        value:
+          - k8s/loadtest
+          - k8s/k6
+      - op: add
+        path: /manifests/rawYaml
+        value:
+          - k8s/k6.yaml

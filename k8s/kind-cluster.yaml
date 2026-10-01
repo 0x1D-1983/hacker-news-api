@@ -1,12 +1,28 @@
-# Single-node kind cluster: the control-plane node runs the API and the edge Envoy.
-# The edge Service's NodePort is published on the host as localhost:8080.
+# Node 1 (hackernews.io/pool=app):      API + edge Envoy; the edge NodePort is published as localhost:8080
+# Node 2 (hackernews.io/pool=loadtest): k6 and the fake Hacker News upstream, tainted so nothing else lands there
+# kind nodes share the host's CPU/RAM, so the 1 vCPU / 2 GB and 4 vCPU / 8 GB budgets are
+# enforced by pod requests/limits, not by the nodes themselves.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: hackernews
 nodes:
   - role: control-plane
+  - role: worker
+    labels:
+      hackernews.io/pool: app
     extraPortMappings:
       - containerPort: 30080
         hostPort: 8080
         listenAddress: 127.0.0.1
         protocol: TCP
+  - role: worker
+    labels:
+      hackernews.io/pool: loadtest
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: hackernews.io/pool
+              value: loadtest
+              effect: NoSchedule

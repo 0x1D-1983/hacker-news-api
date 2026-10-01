@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: k6
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        hackernews.io/pool: loadtest
+      tolerations:
+        - key: hackernews.io/pool
+          operator: Equal
+          value: loadtest
+          effect: NoSchedule
+      initContainers:
+        # The edge returns 503 until the API's first load finishes; busybox wget fails on non-2xx.
+        - name: wait-for-api
+          image: busybox:1.37
+          command: ["sh", "-c", "until wget -qO /dev/null 'http://edge/api/stories/best?n=1'; do sleep 2; done"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+      containers:
+        - name: k6
+          image: grafana/k6:2.3.0
+          args: ["run", "/scripts/load.js"]
+          env:
+            - name: BASE_URL
+              value: http://edge
+            - name: UPSTREAM_URL
+              value: http://fake-hackernews:8080
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "3"
+              memory: 6Gi
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: k6-script
