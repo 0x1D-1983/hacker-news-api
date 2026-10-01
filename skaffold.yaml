@@ -1,0 +1,26 @@
+apiVersion: skaffold/v4beta13
+kind: Config
+metadata:
+  name: hackernews-api
+build:
+  tagPolicy:
+    inputDigest: {}
+  artifacts:
+    - image: hackernews-api
+      context: HackerNews.Api
+      docker:
+        dockerfile: Dockerfile
+  local:
+    push: false
+manifests:
+  rawYaml:
+    - k8s/api.yaml
+    - k8s/ingress.yaml
+deploy:
+  kubectl: {}
+# Developer access to the Service, bypassing the Ingress (so /health and /scalar are reachable too).
+portForward:
+  - resourceType: service
+    resourceName: hackernews-api
+    port: 80
+    localPort: 8080

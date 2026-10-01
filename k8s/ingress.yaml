@@ -1,0 +1,17 @@
+# Public entry point. Only /api/* is routed; /health*, /openapi and /scalar are not
+# reachable from outside the cluster. Kubelet probes hit the pod IP and bypass the Ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hackernews-api
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: hackernews-api
+                port:
+                  name: http

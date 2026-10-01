@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hackernews-api
+spec:
+  selector:
+    app: hackernews-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hackernews-api
+spec:
+  # Each replica keeps its own in-memory cache and polls Hacker News on its own schedule.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hackernews-api
+  template:
+    metadata:
+      labels:
+        app: hackernews-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: api
+          image: hackernews-api
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # No OTLP collector runs in this cluster; point this at one to export traces and metrics.
+            - name: Telemetry__Enabled
+              value: "false"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Probes call the pod IP directly, so /health* works even though the Ingress doesn't route it.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10

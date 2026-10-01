@@ -40,6 +40,49 @@ curl "http://localhost:8080/api/stories/best?n=10"
 
 Pass `-e Telemetry__Enabled=false` instead if no OTLP collector is running.
 
+### Kubernetes (kind + Skaffold)
+
+Requirements: Docker, [kind](https://kind.sigs.k8s.io/), kubectl and [Skaffold](https://skaffold.dev/) v2 (`brew install kind kubectl skaffold`).
+
+```
+k8s/
+  kind-cluster.yaml   single-node kind cluster
+  api.yaml            Deployment (probes, resources, non-root) and ClusterIP Service
+  ingress.yaml        Ingress that routes /api/* only
+scripts/cluster-up.sh creates the cluster and starts cloud-provider-kind
+skaffold.yaml         build + deploy
+```
+
+```bash
+./scripts/cluster-up.sh   # creates the "hackernews" kind cluster and switches kubectl to kind-hackernews
+skaffold run              # one-off build and deploy (skaffold dev: rebuild on change and stream logs)
+```
+
+[cloud-provider-kind](https://github.com/kubernetes-sigs/cloud-provider-kind) runs as a Docker container and implements the Ingress, so no third-party ingress controller is needed. On macOS and Windows it publishes the Ingress on a random localhost port:
+
+```bash
+INGRESS=$(docker port $(docker ps -q --filter name=kindccm) 80/tcp | head -1)
+curl "$INGRESS/api/stories/best?n=10"   # 200
+curl -i "$INGRESS/health"                # 404: not routed
+```
+
+**Only `/api/*` is exposed publicly.** The health endpoints aren't meant to be public, so they're protected at the network layer rather than in the app: the Ingress has no route for `/health*` (or for `/openapi` and `/scalar`). The kubelet's startup, readiness and liveness probes call the pod IP directly, so they bypass the Ingress and keep working. Readiness gates traffic until the first Hacker News load finishes.
+
+For developer access to everything, including `/health` and the Scalar UI, go to the Service directly:
+
+```bash
+kubectl port-forward svc/hackernews-api 8080:80   # skaffold dev does this automatically
+open http://localhost:8080/scalar/v1
+```
+
+Cleanup:
+
+```bash
+skaffold delete
+docker stop cloud-provider-kind
+kind delete cluster --name hackernews
+```
+
 Other endpoints:
 
 | Endpoint | Purpose |
@@ -142,14 +185,14 @@ Requests never call Hacker News. The worker owns all upstream traffic:
 - **A rebuild is all-or-nothing.** If any item request still fails after retries, the whole rebuild is discarded and the previous list stays in place. A partial ranking is never published.
 - **Serving stale data beats serving nothing.** During a long Hacker News outage the API keeps answering with the last good list, while readiness reports `503` once that list is older than `CacheDuration`. In Kubernetes, that would take every replica out of rotation at about the same time during a long outage. If you'd rather keep serving, set a larger `CacheDuration` or point the readiness probe at liveness after the first load.
 - **Single instance.** Each instance keeps its own in-memory list and polls Hacker News on its own schedule.
-- **Rate limiting uses the TCP remote address.** Forwarded headers are not trusted by default; see the enhancements below.
+- **Rate limiting uses the TCP remote address.** Forwarded headers are not trusted by default. Behind the Kubernetes Ingress, every client therefore arrives from the proxy's address (`10.244.0.1` on kind) and shares a single rate-limit bucket; see the enhancements below.
 
 ## Enhancements given more time
 
 - **Separate Worker service with a shared cache.** Move `BestStoriesRefreshWorker` into its own .NET Worker Service that writes the ranked list to Redis, with the API instances only reading it. Hacker News load would then stay at one poller no matter how many API replicas run, and replicas would start ready immediately. A distributed lock or leader election would keep a single poller active. A distributed rate limiter (for example Redis-backed) would belong here too.
 - **Snapshot age metric.** Export the list's age as an observable gauge, so alerts fire before readiness flips.
 - **Incremental updates.** Use Firebase change notifications or `/v0/updates` to refetch only changed items instead of all 200.
-- **Reverse-proxy awareness.** Behind a load balancer, enable `ForwardedHeaders` with known proxies so rate limiting keys on the real client IP. Optionally add API keys with per-key quotas.
+- **Reverse-proxy awareness.** Behind the Ingress or a load balancer, enable `ForwardedHeaders` and trust only the proxy's network (`KnownNetworks`), so rate limiting keys on the real client IP from `X-Forwarded-For`. Alternatively, rate-limit at the Ingress/Gateway itself. Optionally add API keys with per-key quotas.
 - **Output caching** (`AddOutputCache`, varied by `n`) to skip serialization for hot responses, plus `ETag`/`304` support.
-- **Hardening:** HTTPS/HSTS in production, Kestrel connection limits, CORS policy if browsers call the API, and a container image / CI pipeline.
+- **Hardening:** TLS on the Ingress plus HSTS, Kestrel connection limits, a CORS policy if browsers call the API, a NetworkPolicy so only the ingress proxy can reach the pods, and a CI pipeline that builds and pushes the image.
 - **More tests:** load tests (k6 / NBomber) to confirm throughput and that upstream calls stay flat under load, plus resilience tests with simulated upstream faults.

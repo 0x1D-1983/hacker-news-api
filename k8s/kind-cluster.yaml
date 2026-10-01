@@ -1,0 +1,8 @@
+# Single-node kind cluster: the control-plane node also runs the API.
+# External traffic enters through cloud-provider-kind (see scripts/cluster-up.sh),
+# which implements the Ingress in k8s/ingress.yaml.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: hackernews
+nodes:
+  - role: control-plane
