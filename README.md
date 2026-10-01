@@ -30,6 +30,16 @@ curl "http://localhost:5097/api/stories/best?n=10"
 
 To try the endpoint interactively, open the Scalar UI at <http://localhost:5097/scalar/v1#tag/stories/GET/api/stories/best> and use its "Test Request" button.
 
+With Docker (the container listens on port 8080):
+
+```bash
+docker build -t hackernews-api HackerNews.Api
+docker run --rm -p 8080:8080 -e Telemetry__OtlpEndpoint=http://host.docker.internal:4317 hackernews-api
+curl "http://localhost:8080/api/stories/best?n=10"
+```
+
+Pass `-e Telemetry__Enabled=false` instead if no OTLP collector is running.
+
 Other endpoints:
 
 | Endpoint | Purpose |
