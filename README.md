@@ -28,6 +28,8 @@ dotnet run --project HackerNews.Api --launch-profile http
 curl "http://localhost:5097/api/stories/best?n=10"
 ```
 
+To try the endpoint interactively, open the Scalar UI at <http://localhost:5097/scalar/v1#tag/stories/GET/api/stories/best> and use its "Test Request" button.
+
 Other endpoints:
 
 | Endpoint | Purpose |
@@ -35,8 +37,8 @@ Other endpoints:
 | `GET /api/stories/best?n={1..200}` | Best `n` stories, ordered by descending score |
 | `GET /health` | Liveness: `200` whenever the process is up |
 | `GET /health/ready` | Readiness: `200` only when the best stories are loaded and younger than `CacheDuration`, otherwise `503` |
-| `GET /openapi/v1.json` | OpenAPI document (Development only) |
-| `GET /scalar` | [Scalar](https://scalar.com) interactive API reference (Development only) |
+| `GET /openapi/v1.json` | OpenAPI document |
+| `GET /scalar` | [Scalar](https://scalar.com) interactive API reference |
 
 Health endpoints are not rate limited, traced, or request-logged. The stories are loaded in the background at startup, which takes about 5 seconds. Until then `/health/ready` and `/api/stories/best` return `503` (the latter with `Retry-After: 5`).
 

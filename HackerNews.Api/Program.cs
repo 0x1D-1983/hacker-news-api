@@ -35,11 +35,8 @@ var app = builder.Build();
 app.UseExceptionHandler();
 app.UseSerilogRequestLogging(options => options.GetLevel = GetRequestLogLevel);
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-    app.MapScalarApiReference(options => options.WithTitle(ServiceName));
-}
+app.MapOpenApi();
+app.MapScalarApiReference(options => options.WithTitle(ServiceName));
 
 app.UseHttpsRedirection();
 app.UseRateLimiter();
