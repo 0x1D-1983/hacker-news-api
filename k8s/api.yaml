@@ -48,7 +48,7 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          # Probes call the pod IP directly, so /health* works even though the Ingress doesn't route it.
+          # Probes call the pod IP directly, so /health* works even though the edge proxy doesn't route it.
           startupProbe:
             httpGet:
               path: /health

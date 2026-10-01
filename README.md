@@ -47,9 +47,12 @@ Requirements: Docker, [kind](https://kind.sigs.k8s.io/), kubectl and [Skaffold](
 ```
 k8s/
   kind-cluster.yaml   single-node kind cluster
-  api.yaml            Deployment (probes, resources, non-root) and ClusterIP Service
-  ingress.yaml        Ingress that routes /api/* only
-scripts/cluster-up.sh creates the cluster and starts cloud-provider-kind
+  api.yaml            API Deployment (probes, resources, non-root) and ClusterIP Service
+  edge/               edge Envoy proxy (kustomize)
+    envoy.yaml        Envoy config: routes /api/* only
+    edge.yaml         Envoy Deployment and NodePort Service
+    kustomization.yaml  turns envoy.yaml into a ConfigMap
+scripts/cluster-up.sh creates the cluster
 skaffold.yaml         build + deploy
 ```
 
@@ -58,28 +61,28 @@ skaffold.yaml         build + deploy
 skaffold run              # one-off build and deploy (skaffold dev: rebuild on change and stream logs)
 ```
 
-[cloud-provider-kind](https://github.com/kubernetes-sigs/cloud-provider-kind) runs as a Docker container and implements the Ingress, so no third-party ingress controller is needed. On macOS and Windows it publishes the Ingress on a random localhost port:
+The public entry point is an **edge Envoy proxy** on <http://localhost:8080>. kind publishes the edge NodePort (30080) on the host:
 
 ```bash
-INGRESS=$(docker port $(docker ps -q --filter name=kindccm) 80/tcp | head -1)
-curl "$INGRESS/api/stories/best?n=10"   # 200
-curl -i "$INGRESS/health"                # 404: not routed
+curl "localhost:8080/api/stories/best?n=10"   # 200
+curl -i localhost:8080/health                  # 404 from Envoy: not routed
 ```
 
-**Only `/api/*` is exposed publicly.** The health endpoints aren't meant to be public, so they're protected at the network layer rather than in the app: the Ingress has no route for `/health*` (or for `/openapi` and `/scalar`). The kubelet's startup, readiness and liveness probes call the pod IP directly, so they bypass the Ingress and keep working. Readiness gates traffic until the first Hacker News load finishes.
+**Only `/api/*` is exposed publicly.** The health endpoints aren't meant to be public, so they're protected at the network layer rather than in the app. Envoy routes `/api` and `/api/*` to the API Service and answers everything else itself with `404`, including `/health*`, `/openapi` and `/scalar`. It normalises paths before routing, so `/api/../health` and `/api/%2e%2e/health` also get `404`. Encoded slashes (`%2F`) are rejected with `400`. The kubelet's startup, readiness and liveness probes call the API pod IP directly, so they bypass the edge and keep working. Readiness gates traffic until the first Hacker News load finishes.
 
-For developer access to everything, including `/health` and the Scalar UI, go to the Service directly:
+Envoy also sets request-header and idle timeouts, rejects headers with underscores, and keeps its admin interface on localhost inside the pod. Its config lives in `k8s/edge/envoy.yaml`. Kustomize adds a content hash to the ConfigMap name, so editing the config restarts Envoy on the next deploy.
+
+For developer access to everything, including `/health` and the Scalar UI, go to the API Service directly:
 
 ```bash
-kubectl port-forward svc/hackernews-api 8080:80   # skaffold dev does this automatically
-open http://localhost:8080/scalar/v1
+kubectl port-forward svc/hackernews-api 8081:80   # skaffold dev does this automatically
+open http://localhost:8081/scalar/v1
 ```
 
 Cleanup:
 
 ```bash
 skaffold delete
-docker stop cloud-provider-kind
 kind delete cluster --name hackernews
 ```
 
@@ -185,14 +188,14 @@ Requests never call Hacker News. The worker owns all upstream traffic:
 - **A rebuild is all-or-nothing.** If any item request still fails after retries, the whole rebuild is discarded and the previous list stays in place. A partial ranking is never published.
 - **Serving stale data beats serving nothing.** During a long Hacker News outage the API keeps answering with the last good list, while readiness reports `503` once that list is older than `CacheDuration`. In Kubernetes, that would take every replica out of rotation at about the same time during a long outage. If you'd rather keep serving, set a larger `CacheDuration` or point the readiness probe at liveness after the first load.
 - **Single instance.** Each instance keeps its own in-memory list and polls Hacker News on its own schedule.
-- **Rate limiting uses the TCP remote address.** Forwarded headers are not trusted by default. Behind the Kubernetes Ingress, every client therefore arrives from the proxy's address (`10.244.0.1` on kind) and shares a single rate-limit bucket; see the enhancements below.
+- **Rate limiting uses the TCP remote address.** Forwarded headers are not trusted by default. Behind the edge Envoy in Kubernetes, every client therefore arrives from the Envoy pod's address and shares a single rate-limit bucket; see the enhancements below.
 
 ## Enhancements given more time
 
 - **Separate Worker service with a shared cache.** Move `BestStoriesRefreshWorker` into its own .NET Worker Service that writes the ranked list to Redis, with the API instances only reading it. Hacker News load would then stay at one poller no matter how many API replicas run, and replicas would start ready immediately. A distributed lock or leader election would keep a single poller active. A distributed rate limiter (for example Redis-backed) would belong here too.
 - **Snapshot age metric.** Export the list's age as an observable gauge, so alerts fire before readiness flips.
 - **Incremental updates.** Use Firebase change notifications or `/v0/updates` to refetch only changed items instead of all 200.
-- **Reverse-proxy awareness.** Behind the Ingress or a load balancer, enable `ForwardedHeaders` and trust only the proxy's network (`KnownNetworks`), so rate limiting keys on the real client IP from `X-Forwarded-For`. Alternatively, rate-limit at the Ingress/Gateway itself. Optionally add API keys with per-key quotas.
+- **Reverse-proxy awareness.** The edge Envoy already appends the client address to `X-Forwarded-For` (`use_remote_address: true`). Enable `ForwardedHeaders` in the app and trust only the Envoy pods' network (`KnownNetworks`), so rate limiting keys on the real client IP. Alternatively, rate-limit at the edge with Envoy's `local_ratelimit` filter. Optionally add API keys with per-key quotas.
 - **Output caching** (`AddOutputCache`, varied by `n`) to skip serialization for hot responses, plus `ETag`/`304` support.
-- **Hardening:** TLS on the Ingress plus HSTS, Kestrel connection limits, a CORS policy if browsers call the API, a NetworkPolicy so only the ingress proxy can reach the pods, and a CI pipeline that builds and pushes the image.
+- **Hardening:** TLS termination at the edge Envoy plus HSTS, Kestrel connection limits, a CORS policy if browsers call the API, a NetworkPolicy so only the edge Envoy can reach the API pods, a LoadBalancer Service and 2+ Envoy replicas instead of the kind NodePort, and a CI pipeline that builds and pushes the image.
 - **More tests:** load tests (k6 / NBomber) to confirm throughput and that upstream calls stay flat under load, plus resilience tests with simulated upstream faults.
